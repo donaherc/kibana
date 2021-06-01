@@ -21,6 +21,7 @@ const types = (node: string) => async (index: string = '.kibana') => {
   try {
     const { body } = await new Client({ node }).search({
       index,
+      size: 0,
       body: {
         aggs: {
           savedobjs: {
