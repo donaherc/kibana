@@ -7,43 +7,58 @@
  */
 
 import { inspect } from 'util';
-
-import { TermsAggregate } from '@elastic/elasticsearch/api/types';
-
+import { Client } from '@elastic/elasticsearch';
+import url from 'url';
+import { Either, fromNullable, chain, getOrElse } from 'fp-ts/Either';
+import { flow } from 'fp-ts/function';
 import { FtrService } from '../ftr_provider_context';
 
-export class SavedObjectInfoService extends FtrService {
-  private readonly es = this.ctx.getService('es');
+const pluck = (key: string) => (obj: any): Either<Error, string> =>
+  fromNullable(new Error(`Missing ${key}`))(obj[key]);
 
-  public async getTypes(index = '.kibana') {
-    try {
-      const { body } = await this.es.search({
-        index,
-        size: 0,
-        body: {
-          aggs: {
-            savedobjs: {
-              terms: {
-                field: 'type',
-              },
+const types = (node: string) => async (index: string = '.kibana') => {
+  let res: unknown;
+  try {
+    const { body } = await new Client({ node }).search({
+      index,
+      body: {
+        aggs: {
+          savedobjs: {
+            terms: {
+              field: 'type',
             },
           },
         },
-      });
+      },
+    });
 
-      const agg = body.aggregations?.savedobjs as
-        | TermsAggregate<{ key: string; doc_count: number }>
-        | undefined;
+    res = flow(
+      pluck('aggregations'),
+      chain(pluck('savedobjs')),
+      chain(pluck('buckets')),
+      getOrElse((err) => `${err.message}`)
+    )(body);
+  } catch (err) {
+    throw new Error(`Error while searching for saved object types: ${err}`);
+  }
 
-      if (!agg?.buckets) {
-        throw new Error(
-          `expected es to return buckets of saved object types: ${inspect(body, { depth: 100 })}`
-        );
-      }
+  return res;
+};
 
-      return agg.buckets;
-    } catch (error) {
-      throw new Error(`Error while searching for saved object types: ${error}`);
-    }
+export class SavedObjectInfoService extends FtrService {
+  private readonly config = this.ctx.getService('config');
+
+  public getTypes() {
+    return types(url.format(this.config.get('servers.elasticsearch')));
+  }
+
+  public async getTypesPretty() {
+    const xs = await this.getTypes()();
+    return inspect(xs, {
+      compact: false,
+      depth: 99,
+      breakLength: 80,
+      sorted: true,
+    });
   }
 }
