@@ -16,29 +16,34 @@ import { FtrService } from '../ftr_provider_context';
 const pluck = (key: string) => (obj: any): Either<Error, string> =>
   fromNullable(new Error(`Missing ${key}`))(obj[key]);
 
+const query = {
+  aggs: {
+    savedobjs: {
+      terms: {
+        field: 'type',
+      },
+    },
+  },
+};
+
+const buckets = (body: unknown) =>
+  flow(
+    pluck('aggregations'),
+    chain(pluck('savedobjs')),
+    chain(pluck('buckets')),
+    getOrElse((err) => `${err.message}`)
+  )(body);
+
 const types = (node: string) => async (index: string = '.kibana') => {
   let res: unknown;
   try {
     const { body } = await new Client({ node }).search({
       index,
       size: 0,
-      body: {
-        aggs: {
-          savedobjs: {
-            terms: {
-              field: 'type',
-            },
-          },
-        },
-      },
+      body: query,
     });
 
-    res = flow(
-      pluck('aggregations'),
-      chain(pluck('savedobjs')),
-      chain(pluck('buckets')),
-      getOrElse((err) => `${err.message}`)
-    )(body);
+    res = buckets(body);
   } catch (err) {
     throw new Error(`Error while searching for saved object types: ${err}`);
   }
@@ -54,12 +59,14 @@ export class SavedObjectInfoService extends FtrService {
   }
 
   public async getTypesPretty() {
-    const xs = await this.getTypes()();
-    return inspect(xs, {
-      compact: false,
-      depth: 99,
-      breakLength: 80,
-      sorted: true,
-    });
+    return format(await this.getTypes()());
   }
 }
+
+const format = (obj: unknown) =>
+  inspect(obj, {
+    compact: false,
+    depth: 99,
+    breakLength: 80,
+    sorted: true,
+  });
