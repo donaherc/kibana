@@ -7,19 +7,20 @@
 
 import { cloneDeep } from 'lodash';
 import axios from 'axios';
-import { LegacyAPICaller } from 'kibana/server';
+import { LegacyAPICaller, SavedObjectsClientContract } from 'kibana/server';
 import { URL } from 'url';
-import { Logger, CoreStart } from '../../../../../../src/core/server';
+import { CoreStart, ElasticsearchClient, KibanaRequest, Logger } from 'src/core/server';
+import { TelemetryPluginStart, TelemetryPluginSetup } from 'src/plugins/telemetry/server';
 import { transformDataToNdjson } from '../../utils/read_stream/create_stream_from_ndjson';
-import {
-  TelemetryPluginStart,
-  TelemetryPluginSetup,
-} from '../../../../../../src/plugins/telemetry/server';
 import {
   TaskManagerSetupContract,
   TaskManagerStartContract,
 } from '../../../../task_manager/server';
 import { TelemetryDiagTask } from './diagnostic_task';
+import { TelemetryEndpointTask } from './endpoint_task';
+import { EndpointAppContext } from '../../../server/endpoint/types';
+import { AgentService, AgentPolicyServiceInterface } from '../../../../fleet/server';
+import { defaultPackages as FleetDefaultPackages } from '../../../../fleet/common';
 
 type BaseSearchTypes = string | number | boolean | object;
 export type SearchTypes = BaseSearchTypes | BaseSearchTypes[] | undefined;
@@ -45,6 +46,7 @@ export interface TelemetryEvent {
 export class TelemetryEventsSender {
   private readonly initialCheckDelayMs = 10 * 1000;
   private readonly checkIntervalMs = 60 * 1000;
+  private readonly max_records = 10_000;
   private readonly logger: Logger;
   private core?: CoreStart;
   private maxQueueSize = 100;
@@ -55,16 +57,30 @@ export class TelemetryEventsSender {
   private queue: TelemetryEvent[] = [];
   private isOptedIn?: boolean = true; // Assume true until the first check
   private diagTask?: TelemetryDiagTask;
+  private epMetricsTask?: TelemetryEndpointTask;
+  private agentService?: AgentService;
+  private agentPolicyService?: AgentPolicyServiceInterface;
+  private esClient?: ElasticsearchClient;
+  private savedObjectClient?: SavedObjectsClientContract;
 
   constructor(logger: Logger) {
     this.logger = logger.get('telemetry_events');
   }
 
-  public setup(telemetrySetup?: TelemetryPluginSetup, taskManager?: TaskManagerSetupContract) {
+  public setup(
+    telemetrySetup?: TelemetryPluginSetup,
+    taskManager?: TaskManagerSetupContract,
+    endpointContext?: EndpointAppContext
+  ) {
     this.telemetrySetup = telemetrySetup;
+    this.agentService = endpointContext?.service.getAgentService();
+    this.agentPolicyService = endpointContext?.service.getAgentPolicyService();
+    const fakeRequest = { headers: {} } as KibanaRequest;
+    this.savedObjectClient = endpointContext?.service.getScopedSavedObjectsClient(fakeRequest);
 
     if (taskManager) {
       this.diagTask = new TelemetryDiagTask(this.logger, taskManager, this);
+      this.epMetricsTask = new TelemetryEndpointTask(this.logger, taskManager, this);
     }
   }
 
@@ -75,10 +91,12 @@ export class TelemetryEventsSender {
   ) {
     this.telemetryStart = telemetryStart;
     this.core = core;
+    this.esClient = core?.elasticsearch.client.asInternalUser;
 
-    if (taskManager && this.diagTask) {
-      this.logger.debug(`Starting diag task`);
+    if (taskManager && this.diagTask && this.epMetricsTask) {
+      this.logger.debug(`Starting diagnostic and endpoint telemetry tasks`);
       this.diagTask.start(taskManager);
+      this.epMetricsTask.start(taskManager);
     }
 
     this.logger.debug(`Starting local task`);
@@ -124,6 +142,42 @@ export class TelemetryEventsSender {
     }
     const callCluster = this.core.elasticsearch.legacy.client.callAsInternalUser;
     return callCluster('search', query);
+  }
+
+  public async fetchEndpointAgents() {
+    if (this.esClient === undefined) {
+      this.logger.debug(`es client is not available`);
+      return [];
+    }
+
+    return this.agentService?.listAgents(this.esClient, {
+      kuery: `(packages : ${FleetDefaultPackages.Endpoint})`,
+      perPage: this.max_records,
+      showInactive: false,
+      sortField: 'enrolled_at',
+      sortOrder: 'desc',
+    });
+  }
+
+  public async fetchEndpointPolicyConfigs() {
+    if (this.savedObjectClient === undefined) {
+      this.logger.debug(`saved object client is not available`);
+      return [];
+    }
+
+    return this.agentPolicyService?.list(this.savedObjectClient, {
+      perPage: this.max_records,
+    });
+  }
+
+  public async fetchEndpointPolicyResponses() {
+    if (this.esClient === undefined) {
+      this.logger.debug(`es client is not available`);
+      return [];
+    }
+
+    // TODO:@pjhampton - write the query for the `.ds-metrics-endpoint.policy*` ds
+    return [];
   }
 
   public queueTelemetryEvents(events: TelemetryEvent[]) {
