@@ -5,6 +5,9 @@
  * 2.0.
  */
 
+type BaseSearchTypes = string | number | boolean | object;
+export type SearchTypes = BaseSearchTypes | BaseSearchTypes[] | undefined;
+
 // EP Policy Response
 
 export interface EndpointPolicyResponseAggregation {
@@ -137,4 +140,36 @@ interface EndpointMetricOS {
   version: string;
   platform: string;
   full: string;
+}
+
+export interface ESLicense {
+  status: string;
+  uid: string;
+  type: string;
+  issue_date?: string;
+  issue_date_in_millis?: number;
+  expiry_date?: string;
+  expirty_date_in_millis?: number;
+  max_nodes?: number;
+  issued_to?: string;
+  issuer?: string;
+  start_date_in_millis?: number;
+}
+
+export interface TelemetryEvent {
+  [key: string]: SearchTypes;
+  '@timestamp'?: string;
+  data_stream?: {
+    [key: string]: SearchTypes;
+    dataset?: string;
+  };
+  cluster_name?: string;
+  cluster_uuid?: string;
+  file?: {
+    [key: string]: SearchTypes;
+    Ext?: {
+      [key: string]: SearchTypes;
+    };
+  };
+  license?: ESLicense;
 }
